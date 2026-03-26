@@ -1,5 +1,8 @@
 import asyncio
 import json
+import os
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -29,7 +32,16 @@ def _safe_get(obj: Any, path: list[str], default=None):
 
 
 class FeishuWSAdapter(ChannelAdapter):
-    """Feishu long-connection adapter (multi-app)."""
+    """Feishu long-connection adapter.
+
+    Multi-app strategy:
+    - Single app: run in-process (legacy behavior)
+    - Multi app: parent process auto-spawns one child process per app.
+      Each child handles exactly one app via CBG_FEISHU_APP_INDEX,
+      avoiding lark-oapi websocket event-loop conflicts in one process.
+    """
+
+    APP_INDEX_ENV = "CBG_FEISHU_APP_INDEX"
 
     def __init__(self, service, channel_cfg: dict, base_dir: Path):
         self.service = service
@@ -37,10 +49,13 @@ class FeishuWSAdapter(ChannelAdapter):
         self.base_dir = base_dir
         self._running = False
         self._threads: list[threading.Thread] = []
+        self._children: dict[int, subprocess.Popen] = {}
 
         apps_file = self.channel_cfg.get("apps_file", "./configs/feishu_apps.yaml")
         self.apps_path = (base_dir / apps_file).resolve() if not Path(apps_file).is_absolute() else Path(apps_file)
-        self.apps = self._load_apps()
+
+        all_apps = self._load_apps()
+        self.apps = self._select_apps_for_current_process(all_apps)
 
     def _load_apps(self) -> list[dict]:
         if not self.apps_path.exists():
@@ -52,6 +67,24 @@ class FeishuWSAdapter(ChannelAdapter):
         if not apps:
             raise RuntimeError("feishu apps config invalid: apps must be non-empty")
         return apps
+
+    def _select_apps_for_current_process(self, all_apps: list[dict]) -> list[dict]:
+        idx_text = os.environ.get(self.APP_INDEX_ENV, "").strip()
+        if not idx_text:
+            return all_apps
+
+        try:
+            idx = int(idx_text)
+        except Exception as e:
+            raise RuntimeError(f"invalid {self.APP_INDEX_ENV}={idx_text}: {e}")
+
+        if idx < 0 or idx >= len(all_apps):
+            raise RuntimeError(f"{self.APP_INDEX_ENV} out of range: {idx}, apps={len(all_apps)}")
+
+        app = all_apps[idx]
+        app_name = str(app.get("name") or app.get("app_id") or f"app-{idx}")
+        log(f"[feishu] child mode active: index={idx}, app={app_name}")
+        return [app]
 
     def _extract_event(self, data: Any, fallback_app_id: str) -> InboundEvent:
         app_id = _safe_get(data, ["header", "app_id"], "") or _safe_get(data, ["app_id"], "") or fallback_app_id
@@ -139,6 +172,39 @@ class FeishuWSAdapter(ChannelAdapter):
         self._threads.append(t)
         log(f"[feishu] started app={name} ({app_id})")
 
+    def _spawn_child_for_app(self, index: int, app: dict) -> subprocess.Popen:
+        app_name = str(app.get("name") or app.get("app_id") or f"app-{index}")
+        env = os.environ.copy()
+        env[self.APP_INDEX_ENV] = str(index)
+
+        cmd = [sys.executable, "main.py"]
+        proc = subprocess.Popen(cmd, cwd=str(self.base_dir), env=env)
+        log(f"[feishu] worker spawned: app={app_name} index={index} pid={proc.pid}")
+        return proc
+
+    def _start_multi_app_supervisor(self, all_apps: list[dict]) -> None:
+        for idx, app in enumerate(all_apps):
+            self._children[idx] = self._spawn_child_for_app(idx, app)
+
+        def supervise_loop():
+            while self._running:
+                for idx, app in enumerate(all_apps):
+                    proc = self._children.get(idx)
+                    if proc is None:
+                        continue
+                    rc = proc.poll()
+                    if rc is not None and self._running:
+                        app_name = str(app.get("name") or app.get("app_id") or f"app-{idx}")
+                        log(f"[feishu] worker exited: app={app_name} index={idx} rc={rc}, restarting...")
+                        time.sleep(1)
+                        self._children[idx] = self._spawn_child_for_app(idx, app)
+                time.sleep(3)
+
+        t = threading.Thread(target=supervise_loop, daemon=True, name="cbg-feishu-supervisor")
+        t.start()
+        self._threads.append(t)
+        log(f"[feishu] multi-app supervisor started (workers={len(all_apps)})")
+
     def start(self) -> None:
         try:
             import lark_oapi  # noqa: F401
@@ -146,5 +212,13 @@ class FeishuWSAdapter(ChannelAdapter):
             raise RuntimeError("Missing dependency lark-oapi. Run: pip install lark-oapi")
 
         self._running = True
+
+        # Parent mode + multi app => process-supervised workers (one app per process).
+        # Child mode (CBG_FEISHU_APP_INDEX set) => in-process single app.
+        is_child = bool(os.environ.get(self.APP_INDEX_ENV, "").strip())
+        if not is_child and len(self.apps) > 1:
+            self._start_multi_app_supervisor(self.apps)
+            return
+
         for app in self.apps:
             self._start_one_app(app)

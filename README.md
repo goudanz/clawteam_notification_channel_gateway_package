@@ -51,6 +51,22 @@ pip install -r requirements.txt
 
 并支持 `default` 兜底。
 
+## 多机器人运行模式（已内置）
+
+当 `feishu_apps.yaml` 里配置多个 app 时，网关会自动进入**多进程托管模式**：
+
+- 你仍然只需启动一次：`python main.py`
+- 主进程会为每个 app 自动拉起一个 worker 子进程
+- 每个 worker 只处理一个 app（避免 `lark-oapi` 多 app 同进程 event loop 冲突）
+- 子进程异常退出会自动重启
+
+因此，后续新增机器人只需：
+1. 在 `configs/feishu_apps.yaml` 新增 app
+2. 在 `configs/bindings.yaml` 新增对应 `app_id` 路由
+3. 重启一次网关
+
+无需你手工开多个网关终端。
+
 ## 备注
 
 - 当前仅实现 Feishu 长连接接入（不依赖公网回调地址）。
