@@ -40,6 +40,14 @@ class FeishuClient:
         self._expire_at = time.time() + int(r.get("expire", 7200))
         return self._token
 
+    def get_bot_info(self) -> dict:
+        token = self.tenant_access_token()
+        url = f"{BASE}/open-apis/bot/v3/info"
+        r = http_json("GET", url, headers={"Authorization": f"Bearer {token}"})
+        if r.get("code") != 0:
+            raise RuntimeError(f"get bot info failed: {r}")
+        return r
+
     def send_text_to_chat(self, chat_id: str, text: str):
         token = self.tenant_access_token()
         q = parse.urlencode({"receive_id_type": "chat_id"})

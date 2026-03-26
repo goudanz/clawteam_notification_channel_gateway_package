@@ -50,6 +50,9 @@ class FeishuWSAdapter(ChannelAdapter):
         self._running = False
         self._threads: list[threading.Thread] = []
         self._children: dict[int, subprocess.Popen] = {}
+        self._seen_lock = threading.Lock()
+        self._seen_ids: dict[str, float] = {}
+        self._seen_ttl_sec = 600
 
         apps_file = self.channel_cfg.get("apps_file", "./configs/feishu_apps.yaml")
         self.apps_path = (base_dir / apps_file).resolve() if not Path(apps_file).is_absolute() else Path(apps_file)
@@ -118,6 +121,20 @@ class FeishuWSAdapter(ChannelAdapter):
             raw=data,
         )
 
+    def _is_duplicate_message(self, app_id: str, message_id: str) -> bool:
+        if not message_id:
+            return False
+        now = time.time()
+        key = f"{app_id}:{message_id}"
+        with self._seen_lock:
+            expired = [k for k, ts in self._seen_ids.items() if now - ts > self._seen_ttl_sec]
+            for k in expired:
+                self._seen_ids.pop(k, None)
+            if key in self._seen_ids:
+                return True
+            self._seen_ids[key] = now
+        return False
+
     def _start_one_app(self, app: dict):
         import lark_oapi as lark
         import lark_oapi.ws.client as _lark_ws_client
@@ -133,9 +150,39 @@ class FeishuWSAdapter(ChannelAdapter):
 
         client = FeishuClient(app_id, app_secret)
 
+        bot_open_id = ""
+        try:
+            bot_info = client.get_bot_info()
+            bot_open_id = str(((bot_info or {}).get("bot") or {}).get("open_id") or "")
+            if bot_open_id:
+                log(f"[feishu:{name}] bot_open_id={bot_open_id}")
+        except Exception as e:
+            log(f"[feishu:{name}] get bot info failed: {e}")
+
         def on_message(data: Any):
             try:
                 evt = self._extract_event(data, fallback_app_id=app_id)
+
+                if self._is_duplicate_message(evt.app_id, evt.message_id):
+                    log(f"[feishu:{name}] duplicate ignored message_id={evt.message_id}")
+                    return
+
+                # Ignore messages sent by this bot itself (prevents echo loops).
+                if bot_open_id and evt.sender_id and evt.sender_id == bot_open_id:
+                    log(f"[feishu:{name}] self message ignored message_id={evt.message_id}")
+                    return
+
+                # In group chats, only respond when this specific bot is explicitly @mentioned.
+                mentions = _safe_get(data, ["event", "message", "mentions"], None) or []
+                if mentions and bot_open_id:
+                    mention_ids = {
+                        str(_safe_get(m, ["id", "open_id"], "") or "")
+                        for m in mentions
+                    }
+                    if bot_open_id not in mention_ids:
+                        log(f"[feishu:{name}] not-mentioned ignored message_id={evt.message_id}")
+                        return
+
                 result = self.service.handle_event(evt)
                 if result.route:
                     team = result.route.get("team")
