@@ -10,11 +10,20 @@ class GatewayService:
         self.resolver = BindingResolver(cfg.bindings)
 
     def handle_event(self, event: InboundEvent) -> DispatchResult:
+        log(
+            f"inbound channel={event.channel} app={event.app_id} chat={event.chat_id} "
+            f"type={event.message_type} text={event.text[:80]!r}"
+        )
+
         if event.message_type != "text":
             return DispatchResult(ok=True, output=f"ignored non-text: {event.message_type}", route={})
 
         route = self.resolver.resolve(event.channel, event.app_id, event.chat_id)
         if not route:
+            log(
+                f"no-route channel={event.channel} app={event.app_id} chat={event.chat_id}; "
+                f"check configs/bindings.yaml"
+            )
             return DispatchResult(ok=True, output="ignored no route", route={})
 
         cmd = build_clawteam_cmd(event.text, route)

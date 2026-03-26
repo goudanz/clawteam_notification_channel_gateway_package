@@ -1,46 +1,21 @@
 # 通用绑定规则：channel -> app -> chat -> target(team/agent)
-# 已从旧项目 routes_dev.yaml / routes_ops.yaml / routes.yaml 合并迁移
 channels:
   feishu:
     apps:
-      cli_dev_xxx:
+      # dev-bot
+      cli_a94ac1f74c785cb2:
         chats:
-          # 来自 routes_dev.yaml
-          oc_dev_group_id:
-            team: proj-dev
-            agent: dev-a
-            mode: task
-            timeout_sec: 120
+          default:
+            team: gateway-dev
+            agent: dev
+            mode: inbox
+            timeout_sec: 90
 
-          # 来自 routes.yaml（历史单机器人配置，合并到默认 app）
-          oc_d4ed52c7cd35999e4582c88a131a72af:
-            team: proj-dev
-            agent: dev-a
-            mode: task
-            timeout_sec: 120
-          oc_d4fa05d1e465f8362b1818de93b780f2:
-            team: proj-quant
-            agent: quant-a
-            mode: task
-            timeout_sec: 120
-
-        # 优先保留 dev 专属默认
-        default:
-          team: proj-dev
-          agent: dev-triage
-          mode: inbox
-          timeout_sec: 90
-
-      cli_ops_xxx:
+      # market-bot
+      cli_a94e557be5399bc3:
         chats:
-          # 来自 routes_ops.yaml
-          oc_ops_group_id:
-            team: proj-ops
-            agent: ops-a
-            mode: task
-            timeout_sec: 120
-        default:
-          team: proj-ops
-          agent: ops-triage
-          mode: inbox
-          timeout_sec: 90
+          default:
+            team: gateway-market
+            agent: market
+            mode: inbox
+            timeout_sec: 90
