@@ -172,16 +172,19 @@ class FeishuWSAdapter(ChannelAdapter):
                     log(f"[feishu:{name}] self message ignored message_id={evt.message_id}")
                     return
 
-                # In group chats, only respond when this specific bot is explicitly @mentioned.
+                # Strict mention gate: process only when this specific bot is explicitly @mentioned.
+                # This avoids any cross-bot/self-trigger noise in group environments.
                 mentions = _safe_get(data, ["event", "message", "mentions"], None) or []
-                if mentions and bot_open_id:
-                    mention_ids = {
-                        str(_safe_get(m, ["id", "open_id"], "") or "")
-                        for m in mentions
-                    }
-                    if bot_open_id not in mention_ids:
-                        log(f"[feishu:{name}] not-mentioned ignored message_id={evt.message_id}")
-                        return
+                mention_ids = {
+                    str(_safe_get(m, ["id", "open_id"], "") or "")
+                    for m in mentions
+                }
+                if (not bot_open_id) or (bot_open_id not in mention_ids):
+                    log(
+                        f"[feishu:{name}] not-mentioned ignored "
+                        f"message_id={evt.message_id} chat={evt.chat_id}"
+                    )
+                    return
 
                 if evt.message_id:
                     try:
