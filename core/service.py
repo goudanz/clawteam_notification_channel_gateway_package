@@ -1,4 +1,6 @@
-from core.executor import build_clawteam_cmd, run_cmd
+import time
+
+from core.executor import build_clawteam_cmd, run_cmd, wait_for_agent_reply
 from core.log import log
 from core.models import DispatchResult, InboundEvent
 from core.resolver import BindingResolver
@@ -29,15 +31,33 @@ class GatewayService:
         cmd = build_clawteam_cmd(event.text, route)
         log(f"dispatch channel={event.channel} app={event.app_id} chat={event.chat_id} cmd={' '.join(cmd)}")
 
+        send_started_ms = int(time.time() * 1000)
         rc, out = run_cmd(cmd, timeout_sec=int(route.get("timeout_sec", 90)))
         summary = out[:1200] if out else "(no output)"
-        if rc == 0:
-            return DispatchResult(ok=True, output=summary, route=route)
-        return DispatchResult(ok=False, output=f"rc={rc}\n{summary}", route=route)
+        if rc != 0:
+            return DispatchResult(ok=False, output=f"rc={rc}\n{summary}", route=route)
+
+        is_inbox_send = len(cmd) >= 4 and cmd[0:3] == ["clawteam", "inbox", "send"]
+        if is_inbox_send:
+            team = str(route.get("team") or "")
+            agent = str(route.get("agent") or "")
+            reply_timeout = int(route.get("reply_timeout_sec", 60))
+            reply = wait_for_agent_reply(
+                team=team,
+                from_agent=agent,
+                after_ms=send_started_ms,
+                timeout_sec=reply_timeout,
+            )
+            if reply:
+                log(f"reply-ok team={team} agent={agent} chat={event.chat_id}")
+                return DispatchResult(ok=True, output=reply[:2000], route=route)
+
+            log(f"reply-timeout team={team} agent={agent} chat={event.chat_id} timeout={reply_timeout}s")
+            return DispatchResult(ok=False, output=f"agent未在{reply_timeout}s内返回结果，请稍后重试。", route=route)
+
+        return DispatchResult(ok=True, output=summary, route=route)
 
     def run_forever(self):
         log("clawteam-notification-channel-gateway running")
         while True:
-            import time
-
             time.sleep(1)

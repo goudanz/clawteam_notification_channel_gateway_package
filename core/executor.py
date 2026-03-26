@@ -1,4 +1,8 @@
+import json
+import os
 import subprocess
+import time
+from pathlib import Path
 from typing import Any
 
 
@@ -42,3 +46,54 @@ def run_cmd(cmd: list[str], timeout_sec: int = 90) -> tuple[int, str]:
     )
     out = (p.stdout or "") + ("\n" + p.stderr if p.stderr else "")
     return p.returncode, out.strip()
+
+
+def _clawteam_data_dir() -> Path:
+    data_dir = os.environ.get("CLAWTEAM_DATA_DIR", "").strip()
+    if data_dir:
+        return Path(data_dir)
+    return Path.home() / ".clawteam"
+
+
+def _parse_msg_epoch_ms(filename: str) -> int:
+    try:
+        parts = filename.split("-")
+        if len(parts) >= 3 and parts[0] == "msg":
+            return int(parts[1])
+    except Exception:
+        pass
+    return 0
+
+
+def wait_for_agent_reply(
+    team: str,
+    from_agent: str,
+    *,
+    leader_agent: str = "leader",
+    after_ms: int,
+    timeout_sec: int = 45,
+    poll_interval_sec: float = 1.0,
+) -> str | None:
+    inbox_dir = _clawteam_data_dir() / "teams" / team / "inboxes" / leader_agent
+    deadline = time.time() + max(1, timeout_sec)
+
+    while time.time() < deadline:
+        if inbox_dir.exists():
+            files = sorted(inbox_dir.glob("msg-*.json"), key=lambda p: p.name)
+            for f in files:
+                if _parse_msg_epoch_ms(f.name) < after_ms:
+                    continue
+                try:
+                    data = json.loads(f.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+
+                sender = str(data.get("from") or "")
+                receiver = str(data.get("to") or "")
+                content = str(data.get("content") or "").strip()
+                if sender == from_agent and receiver == leader_agent and content:
+                    return content
+
+        time.sleep(max(0.2, poll_interval_sec))
+
+    return None
