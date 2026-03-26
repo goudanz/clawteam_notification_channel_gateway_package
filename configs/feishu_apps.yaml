@@ -1,0 +1,13 @@
+# Feishu 多应用配置（由旧 bridge bots.yaml 迁移）
+apps:
+  - name: dev-bot
+    app_id: cli_dev_xxx
+    app_secret: REPLACE_WITH_DEV_SECRET
+    verify_token: ""
+    encrypt_key: ""
+
+  - name: ops-bot
+    app_id: cli_ops_xxx
+    app_secret: REPLACE_WITH_OPS_SECRET
+    verify_token: ""
+    encrypt_key: ""

@@ -1,0 +1,150 @@
+import asyncio
+import json
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+from channels.base import ChannelAdapter
+from channels.feishu_client import FeishuClient
+from core.log import log
+from core.models import InboundEvent
+
+try:
+    import yaml  # type: ignore
+except Exception:
+    yaml = None
+
+
+def _safe_get(obj: Any, path: list[str], default=None):
+    cur = obj
+    for k in path:
+        if cur is None:
+            return default
+        if isinstance(cur, dict):
+            cur = cur.get(k)
+        else:
+            cur = getattr(cur, k, None)
+    return default if cur is None else cur
+
+
+class FeishuWSAdapter(ChannelAdapter):
+    """Feishu long-connection adapter (multi-app)."""
+
+    def __init__(self, service, channel_cfg: dict, base_dir: Path):
+        self.service = service
+        self.channel_cfg = channel_cfg or {}
+        self.base_dir = base_dir
+        self._running = False
+        self._threads: list[threading.Thread] = []
+
+        apps_file = self.channel_cfg.get("apps_file", "./configs/feishu_apps.yaml")
+        self.apps_path = (base_dir / apps_file).resolve() if not Path(apps_file).is_absolute() else Path(apps_file)
+        self.apps = self._load_apps()
+
+    def _load_apps(self) -> list[dict]:
+        if not self.apps_path.exists():
+            raise RuntimeError(f"feishu apps config not found: {self.apps_path}")
+        if yaml is None:
+            raise RuntimeError("PyYAML not installed. Run: pip install pyyaml")
+        data = yaml.safe_load(self.apps_path.read_text(encoding="utf-8")) or {}
+        apps = data.get("apps") or []
+        if not apps:
+            raise RuntimeError("feishu apps config invalid: apps must be non-empty")
+        return apps
+
+    def _extract_event(self, data: Any, fallback_app_id: str) -> InboundEvent:
+        app_id = _safe_get(data, ["header", "app_id"], "") or _safe_get(data, ["app_id"], "") or fallback_app_id
+        event = _safe_get(data, ["event"], None) or data
+        msg = _safe_get(event, ["message"], None) or _safe_get(event, ["event", "message"], None)
+        sender = _safe_get(event, ["sender"], None) or _safe_get(event, ["event", "sender"], None)
+
+        chat_id = str(_safe_get(msg, ["chat_id"], "") or "")
+        msg_type = str(_safe_get(msg, ["message_type"], "") or "")
+        msg_id = str(_safe_get(msg, ["message_id"], "") or "")
+        sender_id = str(_safe_get(sender, ["sender_id", "open_id"], "") or "")
+        content_raw = _safe_get(msg, ["content"], "{}") or "{}"
+
+        text = ""
+        try:
+            if isinstance(content_raw, str):
+                text = (json.loads(content_raw) or {}).get("text", "")
+            elif isinstance(content_raw, dict):
+                text = content_raw.get("text", "") or ""
+        except Exception:
+            text = ""
+
+        return InboundEvent(
+            channel="feishu",
+            app_id=str(app_id),
+            chat_id=chat_id,
+            sender_id=sender_id,
+            message_id=msg_id,
+            message_type=msg_type,
+            text=text,
+            raw=data,
+        )
+
+    def _start_one_app(self, app: dict):
+        import lark_oapi as lark
+        import lark_oapi.ws.client as _lark_ws_client
+
+        name = str(app.get("name") or app.get("app_id") or "feishu-app")
+        app_id = str(app.get("app_id") or "").strip()
+        app_secret = str(app.get("app_secret") or "").strip()
+        verify_token = str(app.get("verify_token") or app.get("verification_token") or "").strip()
+        encrypt_key = str(app.get("encrypt_key") or "").strip()
+
+        if not app_id or not app_secret:
+            raise RuntimeError(f"invalid feishu app config for {name}")
+
+        client = FeishuClient(app_id, app_secret)
+
+        def on_message(data: Any):
+            try:
+                evt = self._extract_event(data, fallback_app_id=app_id)
+                result = self.service.handle_event(evt)
+                if result.route:
+                    team = result.route.get("team")
+                    agent = result.route.get("agent")
+                    if result.ok:
+                        reply = f"✅ 已转发\nteam={team} agent={agent}\n\n{result.output}"
+                    else:
+                        reply = f"❌ 执行失败\nteam={team} agent={agent}\n\n{result.output}"
+                    client.send_text_to_chat(evt.chat_id, reply)
+            except Exception as e:
+                log(f"[feishu:{name}] on_message error: {e}")
+
+        builder = lark.EventDispatcherHandler.builder(encrypt_key, verify_token).register_p2_im_message_receive_v1(on_message)
+        handler = builder.build()
+        ws_client = lark.ws.Client(app_id, app_secret, event_handler=handler, log_level=lark.LogLevel.INFO)
+
+        def run_ws():
+            ws_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(ws_loop)
+            _lark_ws_client.loop = ws_loop
+            try:
+                while self._running:
+                    try:
+                        ws_client.start()
+                    except Exception as e:
+                        log(f"[feishu:{name}] websocket error: {e}")
+                    if self._running:
+                        time.sleep(5)
+            finally:
+                ws_loop.close()
+
+        t = threading.Thread(target=run_ws, daemon=True, name=f"cbg-feishu-{name}")
+        t.start()
+        self._threads.append(t)
+        log(f"[feishu] started app={name} ({app_id})")
+
+    def start(self) -> None:
+        try:
+            import lark_oapi  # noqa: F401
+        except Exception:
+            raise RuntimeError("Missing dependency lark-oapi. Run: pip install lark-oapi")
+
+        self._running = True
+        for app in self.apps:
+            self._start_one_app(app)

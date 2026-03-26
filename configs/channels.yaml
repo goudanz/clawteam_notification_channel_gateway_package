@@ -1,0 +1,13 @@
+channels:
+  feishu:
+    enabled: true
+    mode: ws
+    apps_file: ./configs/feishu_apps.yaml
+
+  dingtalk:
+    enabled: false
+    mode: stream
+
+  wecom:
+    enabled: false
+    mode: ws
