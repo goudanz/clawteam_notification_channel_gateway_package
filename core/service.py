@@ -1,3 +1,4 @@
+import re
 import time
 
 from core.executor import build_clawteam_cmd, run_cmd, wait_for_agent_reply
@@ -10,6 +11,13 @@ class GatewayService:
     def __init__(self, cfg):
         self.cfg = cfg
         self.resolver = BindingResolver(cfg.bindings)
+
+    @staticmethod
+    def _clean_agent_reply(text: str) -> str:
+        t = (text or "").strip()
+        # strip worker-added prefixes like "DEV_REPLY:" / "MARKET_REPLY:" / "REPLY:"
+        t = re.sub(r"^[A-Z_]+_?REPLY\s*:\s*", "", t, flags=re.IGNORECASE)
+        return t.strip()
 
     def handle_event(self, event: InboundEvent) -> DispatchResult:
         log(
@@ -50,7 +58,8 @@ class GatewayService:
             )
             if reply:
                 log(f"reply-ok team={team} agent={agent} chat={event.chat_id}")
-                return DispatchResult(ok=True, output=reply[:2000], route=route)
+                clean = self._clean_agent_reply(reply)
+                return DispatchResult(ok=True, output=clean[:2000], route=route)
 
             log(f"reply-timeout team={team} agent={agent} chat={event.chat_id} timeout={reply_timeout}s")
             return DispatchResult(ok=False, output=f"agent未在{reply_timeout}s内返回结果，请稍后重试。", route=route)

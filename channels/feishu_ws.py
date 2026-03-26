@@ -183,17 +183,12 @@ class FeishuWSAdapter(ChannelAdapter):
                         log(f"[feishu:{name}] not-mentioned ignored message_id={evt.message_id}")
                         return
 
-                # Ack on the original user message: "typing" style reaction.
                 if evt.message_id:
                     try:
-                        client.add_reaction(evt.message_id, emoji_type="KEYBOARD")
+                        client.add_reaction(evt.message_id, emoji_type="OneSecond")
+                        log(f"[feishu:{name}] ack reaction ok message_id={evt.message_id} emoji=OneSecond")
                     except Exception as e:
-                        # fallback emoji when KEYBOARD is unsupported in tenant emoji set
-                        log(f"[feishu:{name}] add KEYBOARD reaction failed: {e}; fallback to HOURGLASS")
-                        try:
-                            client.add_reaction(evt.message_id, emoji_type="HOURGLASS")
-                        except Exception as e2:
-                            log(f"[feishu:{name}] add fallback reaction failed: {e2}")
+                        log(f"[feishu:{name}] add reaction failed emoji=OneSecond: {e}")
 
                 result = self.service.handle_event(evt)
                 if result.route:
