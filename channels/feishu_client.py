@@ -29,6 +29,10 @@ class FeishuClient:
         self._token = None
         self._expire_at = 0.0
 
+    def _auth_headers(self) -> dict:
+        token = self.tenant_access_token()
+        return {"Authorization": f"Bearer {token}"}
+
     def tenant_access_token(self) -> str:
         if self._token and time.time() < self._expire_at - 60:
             return self._token
@@ -48,8 +52,19 @@ class FeishuClient:
             raise RuntimeError(f"get bot info failed: {r}")
         return r
 
+    def add_reaction(self, message_id: str, emoji_type: str = "THUMBSUP") -> dict:
+        url = f"{BASE}/open-apis/im/v1/messages/{message_id}/reactions"
+        payload = {
+            "reaction_type": {
+                "emoji_type": emoji_type,
+            }
+        }
+        r = http_json("POST", url, payload, headers=self._auth_headers())
+        if r.get("code") != 0:
+            raise RuntimeError(f"add reaction failed: {r}")
+        return r
+
     def send_text_to_chat(self, chat_id: str, text: str):
-        token = self.tenant_access_token()
         q = parse.urlencode({"receive_id_type": "chat_id"})
         url = f"{BASE}/open-apis/im/v1/messages?{q}"
         payload = {
@@ -57,7 +72,7 @@ class FeishuClient:
             "msg_type": "text",
             "content": json.dumps({"text": text}, ensure_ascii=False),
         }
-        r = http_json("POST", url, payload, headers={"Authorization": f"Bearer {token}"})
+        r = http_json("POST", url, payload, headers=self._auth_headers())
         if r.get("code") != 0:
             raise RuntimeError(f"send message failed: {r}")
         return r

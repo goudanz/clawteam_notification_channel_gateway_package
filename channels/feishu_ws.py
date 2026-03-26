@@ -183,15 +183,22 @@ class FeishuWSAdapter(ChannelAdapter):
                         log(f"[feishu:{name}] not-mentioned ignored message_id={evt.message_id}")
                         return
 
+                # Ack on the original user message: "typing" style reaction.
+                if evt.message_id:
+                    try:
+                        client.add_reaction(evt.message_id, emoji_type="KEYBOARD")
+                    except Exception as e:
+                        # fallback emoji when KEYBOARD is unsupported in tenant emoji set
+                        log(f"[feishu:{name}] add KEYBOARD reaction failed: {e}; fallback to HOURGLASS")
+                        try:
+                            client.add_reaction(evt.message_id, emoji_type="HOURGLASS")
+                        except Exception as e2:
+                            log(f"[feishu:{name}] add fallback reaction failed: {e2}")
+
                 result = self.service.handle_event(evt)
                 if result.route:
-                    team = result.route.get("team")
-                    agent = result.route.get("agent")
-                    if result.ok:
-                        reply = f"✅ 已转发\nteam={team} agent={agent}\n\n{result.output}"
-                    else:
-                        reply = f"❌ 执行失败\nteam={team} agent={agent}\n\n{result.output}"
-                    client.send_text_to_chat(evt.chat_id, reply)
+                    # Only forward agent reply text to end user.
+                    client.send_text_to_chat(evt.chat_id, result.output)
             except Exception as e:
                 log(f"[feishu:{name}] on_message error: {e}")
 
