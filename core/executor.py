@@ -91,7 +91,9 @@ def wait_for_agent_reply(
                 sender = str(data.get("from") or "")
                 receiver = str(data.get("to") or "")
                 content = str(data.get("content") or "").strip()
-                if sender == from_agent and receiver == leader_agent and content:
+                # Worker may run outside clawteam spawn context and send with from="agent".
+                # Accept both explicit target agent name and generic "agent".
+                if sender in {from_agent, "agent"} and receiver == leader_agent and content:
                     return content
 
         time.sleep(max(0.2, poll_interval_sec))
