@@ -6,7 +6,7 @@ import re
 import subprocess
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 SEEN_EVENT_FILES = set()
@@ -204,6 +204,16 @@ def build_synth_prompt(user_text, intent, reason, outputs):
     return '\n'.join(parts)
 
 
+def run_agent_task(nanobot_bin, root_workspace, session_id, agent, body, intent, reason, preferred_skills):
+    ws = str(Path(root_workspace) / agent)
+    prompt = build_agent_prompt(agent, body, intent, reason, preferred_skills)
+    print(f'[main-worker] calling agent={agent} ws={ws} preferred_skills={preferred_skills}', flush=True)
+    arc, aout = ask_nanobot(nanobot_bin, ws, session_id + ':' + agent, prompt, timeout=900)
+    print(f'[main-worker] agent_done agent={agent} rc={arc} out_len={len(aout)}', flush=True)
+    content = aout[:3000] if arc == 0 else f'[{agent} 执行失败 rc={arc}]\n{aout[:1200]}'
+    return agent, content
+
+
 def process_message(nanobot_bin, root_workspace, session_id, body):
     main_ws = str(Path(root_workspace) / 'main')
     agent_skill_map = load_agent_skill_map(root_workspace)
@@ -215,21 +225,29 @@ def process_message(nanobot_bin, root_workspace, session_id, body):
     intent = str(route.get('user_intent') or body[:120]).strip()
     print(f'[main-worker] route agents={agents} reason={reason} intent={intent}', flush=True)
     outputs = {}
-    for agent in agents:
-        ws = str(Path(root_workspace) / agent)
-        preferred_skills = agent_skill_map.get(agent, [])
-        prompt = build_agent_prompt(agent, body, intent, reason, preferred_skills)
-        print(f'[main-worker] calling agent={agent} ws={ws} preferred_skills={preferred_skills}', flush=True)
-        arc, aout = ask_nanobot(nanobot_bin, ws, session_id + ':' + agent, prompt, timeout=900)
-        print(f'[main-worker] agent_done agent={agent} rc={arc} out_len={len(aout)}', flush=True)
-        outputs[agent] = aout[:3000] if arc == 0 else f'[{agent} 执行失败 rc={arc}]\n{aout[:1200]}'
-    print(f'[main-worker] synth_start agents={list(outputs.keys())}', flush=True)
-    src, sout = ask_nanobot(nanobot_bin, main_ws, session_id + ':main-synth', build_synth_prompt(body, intent, reason, outputs), timeout=900)
+    max_agent_workers = max(1, min(len(agents), 6))
+    with ThreadPoolExecutor(max_workers=max_agent_workers, thread_name_prefix='agent-task') as executor:
+        future_map = {}
+        for agent in agents:
+            preferred_skills = agent_skill_map.get(agent, [])
+            future = executor.submit(run_agent_task, nanobot_bin, root_workspace, session_id, agent, body, intent, reason, preferred_skills)
+            future_map[future] = agent
+        for future in as_completed(future_map):
+            agent = future_map[future]
+            try:
+                agent_name, content = future.result()
+                outputs[agent_name] = content
+            except Exception as e:
+                print(f'[main-worker] agent_error agent={agent} err={e!r}', flush=True)
+                outputs[agent] = f'[{agent} 执行失败]\n{e}'
+    ordered_outputs = {agent: outputs[agent] for agent in agents if agent in outputs}
+    print(f'[main-worker] synth_start agents={list(ordered_outputs.keys())}', flush=True)
+    src, sout = ask_nanobot(nanobot_bin, main_ws, session_id + ':main-synth', build_synth_prompt(body, intent, reason, ordered_outputs), timeout=900)
     print(f'[main-worker] synth_done rc={src} out_len={len(sout)}', flush=True)
     if src == 0 and sout.strip():
         return sout[:5000]
     blocks = [f'需求理解：{intent}']
-    for agent, content in outputs.items():
+    for agent, content in ordered_outputs.items():
         blocks.append(f'【{agent}】\n{content}')
     return '\n\n'.join(blocks)[:5000]
 
