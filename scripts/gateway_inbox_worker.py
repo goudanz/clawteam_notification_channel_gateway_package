@@ -6,6 +6,8 @@ import subprocess
 import time
 from pathlib import Path
 
+SESSION_RE = re.compile(r"^\[SESSION_ID\](.*?)\[/SESSION_ID\]\s*", re.DOTALL)
+
 MSG_RE = re.compile(r"^\[.*?\]\s+message\s+from=.*?\s:\s(.*)$")
 
 
@@ -29,12 +31,24 @@ def read_one(team: str, agent: str, env: dict) -> str | None:
     return None
 
 
+def split_session_payload(text: str) -> tuple[str, str]:
+    raw = (text or '').strip()
+    m = SESSION_RE.match(raw)
+    if not m:
+        return 'cli:direct', raw
+    session_id = (m.group(1) or '').strip() or 'cli:direct'
+    body = SESSION_RE.sub('', raw, count=1).strip()
+    return session_id, body
+
+
 def ask_nanobot(nanobot_bin: str, workspace: str, text: str) -> str:
+    session_id, body = split_session_payload(text)
     rc, out = run([
         nanobot_bin,
         'agent',
         '--workspace', workspace,
-        '--message', text,
+        '--session', session_id,
+        '--message', body,
         '--no-logs',
     ], timeout=900)
     if rc == 0 and out.strip():

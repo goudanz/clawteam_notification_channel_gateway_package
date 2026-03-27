@@ -36,8 +36,15 @@ class GatewayService:
             )
             return DispatchResult(ok=True, output="ignored no route", route={})
 
-        cmd = build_clawteam_cmd(event.text, route)
-        log(f"dispatch channel={event.channel} app={event.app_id} chat={event.chat_id} cmd={' '.join(cmd)}")
+        payload_text = event.text
+        if event.session_id:
+            payload_text = f"[SESSION_ID]{event.session_id}[/SESSION_ID]\n{event.text}"
+
+        cmd = build_clawteam_cmd(payload_text, route)
+        log(
+            f"dispatch channel={event.channel} app={event.app_id} chat={event.chat_id} "
+            f"session={event.session_id} cmd={' '.join(cmd)}"
+        )
 
         send_started_ms = int(time.time() * 1000)
         rc, out = run_cmd(cmd, timeout_sec=int(route.get("timeout_sec", 90)))

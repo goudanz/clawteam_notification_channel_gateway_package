@@ -11,6 +11,8 @@ class InboundEvent:
     message_id: str
     message_type: str
     text: str
+    chat_type: str = ""
+    session_id: str = ""
     raw: Any = None
 
 

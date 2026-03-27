@@ -96,6 +96,7 @@ class FeishuWSAdapter(ChannelAdapter):
         sender = _safe_get(event, ["sender"], None) or _safe_get(event, ["event", "sender"], None)
 
         chat_id = str(_safe_get(msg, ["chat_id"], "") or "")
+        chat_type = str(_safe_get(msg, ["chat_type"], "") or "")
         msg_type = str(_safe_get(msg, ["message_type"], "") or "")
         msg_id = str(_safe_get(msg, ["message_id"], "") or "")
         sender_id = str(_safe_get(sender, ["sender_id", "open_id"], "") or "")
@@ -110,6 +111,8 @@ class FeishuWSAdapter(ChannelAdapter):
         except Exception:
             text = ""
 
+        session_id = f"feishu:{app_id}:{chat_id}" if chat_id else f"feishu:{app_id}:unknown"
+
         return InboundEvent(
             channel="feishu",
             app_id=str(app_id),
@@ -118,6 +121,8 @@ class FeishuWSAdapter(ChannelAdapter):
             message_id=msg_id,
             message_type=msg_type,
             text=text,
+            chat_type=chat_type,
+            session_id=session_id,
             raw=data,
         )
 
@@ -180,19 +185,23 @@ class FeishuWSAdapter(ChannelAdapter):
                     log(f"[feishu:{name}] self message ignored message_id={evt.message_id}")
                     return
 
-                # Strict mention gate: process only when this specific bot is explicitly @mentioned.
-                # This avoids any cross-bot/self-trigger noise in group environments.
-                mentions = _safe_get(data, ["event", "message", "mentions"], None) or []
-                mention_ids = {
-                    str(_safe_get(m, ["id", "open_id"], "") or "")
-                    for m in mentions
-                }
-                if (not bot_open_id) or (bot_open_id not in mention_ids):
-                    log(
-                        f"[feishu:{name}] not-mentioned ignored "
-                        f"message_id={evt.message_id} chat={evt.chat_id}"
-                    )
-                    return
+                # Mention gate:
+                # - group chat: must explicitly @ current bot to avoid cross-bot / cross-group noise
+                # - p2p chat: allow direct messages without @ so DM can reply normally
+                chat_type = str(_safe_get(data, ["event", "message", "chat_type"], "") or "").lower()
+                is_p2p = chat_type == "p2p"
+                if not is_p2p:
+                    mentions = _safe_get(data, ["event", "message", "mentions"], None) or []
+                    mention_ids = {
+                        str(_safe_get(m, ["id", "open_id"], "") or "")
+                        for m in mentions
+                    }
+                    if (not bot_open_id) or (bot_open_id not in mention_ids):
+                        log(
+                            f"[feishu:{name}] not-mentioned ignored "
+                            f"message_id={evt.message_id} chat={evt.chat_id} chat_type={chat_type}"
+                        )
+                        return
 
                 if evt.message_id:
                     try:
