@@ -1,51 +1,19 @@
-# 通用绑定规则：channel -> app -> chat -> target(team/agent)
 channels:
   feishu:
     apps:
-      # dev-bot
       cli_a94ac1f74c785cb2:
         chats:
-          # 开发群1
-          oc_d4ed52c7cd35999e4582c88a131a72af:
-            team: gateway-dev
-            agent: dev
-            mode: inbox
-            timeout_sec: 90
-
-          # 开发群2
-          oc_d4fa05d1e465f8362b1818de93b780f2:
-            team: gateway-dev
-            agent: dev
-            mode: inbox
-            timeout_sec: 90
-
-          # 公司大群（@dev-bot）
-          oc_b950f7a6a289d0179eb305797aa65dd1:
-            team: gateway-dev
-            agent: dev
-            mode: inbox
-            timeout_sec: 90
-
-          # 兜底
           default:
             team: gateway-dev
             agent: dev
             mode: inbox
-            timeout_sec: 90
-
-      # market-bot
+            timeout_sec: 120
+            reply_timeout_sec: 120
       cli_a94e557be5399bc3:
         chats:
-          # 公司大群（@market-bot）
-          oc_b950f7a6a289d0179eb305797aa65dd1:
-            team: gateway-market
-            agent: market
-            mode: inbox
-            timeout_sec: 90
-
-          # 兜底
           default:
-            team: gateway-market
-            agent: market
+            team: gateway-dev
+            agent: dev
             mode: inbox
-            timeout_sec: 90
+            timeout_sec: 120
+            reply_timeout_sec: 120
