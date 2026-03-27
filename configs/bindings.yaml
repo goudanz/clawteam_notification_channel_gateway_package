@@ -1,16 +1,20 @@
 channels:
   feishu:
     apps:
-      cli_a94ac1f74c785cb2:
+      cli_a94e557be5399bc3:
         chats:
-          default:
+          oc_d4ed52c7cd35999e4582c88a131a72af:
             team: gateway-dev
             agent: dev
             mode: inbox
             timeout_sec: 120
             reply_timeout_sec: 120
-      cli_a94e557be5399bc3:
-        chats:
+          oc_d4fa05d1e465f8362b1818de93b780f2:
+            team: gateway-dev
+            agent: dev
+            mode: inbox
+            timeout_sec: 120
+            reply_timeout_sec: 120
           default:
             team: gateway-dev
             agent: dev

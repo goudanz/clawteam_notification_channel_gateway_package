@@ -4,13 +4,15 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 SEEN_EVENT_FILES = set()
+SEEN_LOCK = threading.Lock()
 
 SESSION_RE = re.compile(r"^\[SESSION_ID\](.*?)\[/SESSION_ID\]\s*", re.DOTALL)
-MSG_RE = re.compile(r"^\[.*?\]\s+message\s+from=.*?\s:\s(.*)$")
 JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 AGENTS = ["product", "law", "code", "quant", "content", "market"]
 ROUTER_INSTRUCTION = """你是 main，总入口 CEO agent。
@@ -42,29 +44,44 @@ def run(cmd, env=None, timeout=120):
     return p.returncode, out
 
 
+def mark_seen(name):
+    with SEEN_LOCK:
+        SEEN_EVENT_FILES.add(name)
+
+
+def is_seen(name):
+    with SEEN_LOCK:
+        return name in SEEN_EVENT_FILES
+
+
 def read_one(team, agent, env):
     base = Path(env.get('CLAWTEAM_DATA_DIR', str(Path.home() / 'ai-lab' / 'clawteam-data'))) / 'teams' / team / 'events'
     if not base.exists():
         return None
     files = sorted(base.glob('evt-*.json'), key=lambda p: p.name)
     for f in files:
-        if f.name in SEEN_EVENT_FILES:
+        if is_seen(f.name):
             continue
         try:
             data = json.loads(f.read_text(encoding='utf-8'))
         except Exception:
-            SEEN_EVENT_FILES.add(f.name)
+            mark_seen(f.name)
             continue
         if str(data.get('type') or '') != 'message':
-            SEEN_EVENT_FILES.add(f.name)
+            mark_seen(f.name)
             continue
         if str(data.get('to') or '') != agent:
-            SEEN_EVENT_FILES.add(f.name)
+            mark_seen(f.name)
             continue
         content = str(data.get('content') or '').strip()
-        SEEN_EVENT_FILES.add(f.name)
+        mark_seen(f.name)
         if content:
-            return content
+            event_id = str(data.get('id') or f.stem)
+            return {
+                'event_file': f.name,
+                'event_id': event_id,
+                'content': content,
+            }
     return None
 
 
@@ -188,6 +205,29 @@ def send_back(team, leader, text, env):
     run(['clawteam', 'inbox', 'send', team, leader, text], env=env, timeout=120)
 
 
+def handle_message(message, args, env):
+    msg = message['content']
+    event_file = message.get('event_file', '')
+    event_id = message.get('event_id', '')
+    print(f"[main-worker] received event_file={event_file} event_id={event_id} msg={msg[:200]!r}", flush=True)
+    session_id, body = split_session_payload(msg)
+    print(f"[main-worker] session_id={session_id} body={body[:200]!r}", flush=True)
+    answer = process_message(args.nanobot_bin, args.workspace_root, session_id, body)
+    print(f'[main-worker] answer_ready event_id={event_id} len={len(answer)}', flush=True)
+    send_back(args.team, args.leader, f'{args.prefix}: {answer}', env)
+    print(f'[main-worker] sent back to leader event_id={event_id}', flush=True)
+
+
+def reap_futures(futures):
+    alive = []
+    for future in futures:
+        if future.done():
+            future.result()
+        else:
+            alive.append(future)
+    return alive
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--team', required=True)
@@ -195,6 +235,7 @@ def main():
     ap.add_argument('--leader', default='leader')
     ap.add_argument('--prefix', default='MAIN_REPLY')
     ap.add_argument('--sleep', type=float, default=1.5)
+    ap.add_argument('--max-workers', type=int, default=4)
     ap.add_argument('--nanobot-bin', default=str(Path.home() / 'ai-lab' / 'venvs' / 'nanobot' / 'bin' / 'nanobot'))
     ap.add_argument('--workspace-root', default=str(Path.home() / '.nanobot' / 'super-team'))
     args = ap.parse_args()
@@ -202,27 +243,27 @@ def main():
     env.setdefault('CLAWTEAM_DATA_DIR', str(Path.home() / 'ai-lab' / 'clawteam-data'))
     base = Path(env.get('CLAWTEAM_DATA_DIR', str(Path.home() / 'ai-lab' / 'clawteam-data'))) / 'teams' / args.team / 'events'
     if base.exists():
-        for f in base.glob('evt-*.json'):
-            SEEN_EVENT_FILES.add(f.name)
-    print(f'[main-worker] started team={args.team} agent={args.agent} workspace_root={args.workspace_root} seen={len(SEEN_EVENT_FILES)}', flush=True)
-    while True:
-        try:
-            msg = read_one(args.team, args.agent, env)
-            if not msg:
-                time.sleep(args.sleep)
-                continue
-            print(f'[main-worker] received msg={msg[:200]!r}', flush=True)
-            session_id, body = split_session_payload(msg)
-            print(f'[main-worker] session_id={session_id} body={body[:200]!r}', flush=True)
-            answer = process_message(args.nanobot_bin, args.workspace_root, session_id, body)
-            print(f'[main-worker] answer_ready len={len(answer)}', flush=True)
-            send_back(args.team, args.leader, f'{args.prefix}: {answer}', env)
-            print('[main-worker] sent back to leader', flush=True)
-        except KeyboardInterrupt:
-            raise
-        except Exception as e:
-            print(f'[main-worker] error: {e!r}', flush=True)
-            send_back(args.team, args.leader, f'{args.prefix}: 调度失败\n{e}', env)
-            time.sleep(max(1.0, args.sleep))
+        with SEEN_LOCK:
+            for f in base.glob('evt-*.json'):
+                SEEN_EVENT_FILES.add(f.name)
+    print(f'[main-worker] started team={args.team} agent={args.agent} workspace_root={args.workspace_root} max_workers={args.max_workers} seen={len(SEEN_EVENT_FILES)}', flush=True)
+    futures = []
+    with ThreadPoolExecutor(max_workers=max(1, args.max_workers), thread_name_prefix='main-worker') as executor:
+        while True:
+            try:
+                futures = reap_futures(futures)
+                message = read_one(args.team, args.agent, env)
+                if not message:
+                    time.sleep(args.sleep)
+                    continue
+                futures.append(executor.submit(handle_message, message, args, env.copy()))
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                print(f'[main-worker] loop_error: {e!r}', flush=True)
+                send_back(args.team, args.leader, f'{args.prefix}: 调度失败\n{e}', env)
+                time.sleep(max(1.0, args.sleep))
+
+
 if __name__ == '__main__':
     main()
