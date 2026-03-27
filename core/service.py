@@ -15,6 +15,7 @@ class GatewayService:
     @staticmethod
     def _clean_agent_reply(text: str) -> str:
         t = (text or "").strip()
+        t = re.sub(r"^\[SESSION_ID\].*?\[/SESSION_ID\]\s*", "", t, flags=re.IGNORECASE | re.DOTALL)
         # strip worker-added prefixes like "DEV_REPLY:" / "MARKET_REPLY:" / "REPLY:"
         t = re.sub(r"^[A-Z_]+_?REPLY\s*:\s*", "", t, flags=re.IGNORECASE)
         return t.strip()
@@ -62,6 +63,7 @@ class GatewayService:
                 from_agent=agent,
                 after_ms=send_started_ms,
                 timeout_sec=reply_timeout,
+                session_id=event.session_id,
             )
             if reply:
                 log(f"reply-ok team={team} agent={agent} chat={event.chat_id}")

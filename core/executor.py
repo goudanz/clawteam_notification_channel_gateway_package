@@ -73,6 +73,7 @@ def wait_for_agent_reply(
     after_ms: int,
     timeout_sec: int = 45,
     poll_interval_sec: float = 1.0,
+    session_id: str = "",
 ) -> str | None:
     inbox_dir = _clawteam_data_dir() / "teams" / team / "inboxes" / leader_agent
     deadline = time.time() + max(1, timeout_sec)
@@ -93,8 +94,13 @@ def wait_for_agent_reply(
                 content = str(data.get("content") or "").strip()
                 # Worker may run outside clawteam spawn context and send with from="agent".
                 # Accept both explicit target agent name and generic "agent".
-                if sender in {from_agent, "agent"} and receiver == leader_agent and content:
-                    return content
+                if sender not in {from_agent, "agent"} or receiver != leader_agent or not content:
+                    continue
+                if session_id:
+                    marker = f"[SESSION_ID]{session_id}[/SESSION_ID]"
+                    if marker not in content:
+                        continue
+                return content
 
         time.sleep(max(0.2, poll_interval_sec))
 

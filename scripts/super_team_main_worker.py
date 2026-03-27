@@ -214,8 +214,9 @@ def handle_message(message, args, env):
     print(f"[main-worker] session_id={session_id} body={body[:200]!r}", flush=True)
     answer = process_message(args.nanobot_bin, args.workspace_root, session_id, body)
     print(f'[main-worker] answer_ready event_id={event_id} len={len(answer)}', flush=True)
-    send_back(args.team, args.leader, f'{args.prefix}: {answer}', env)
-    print(f'[main-worker] sent back to leader event_id={event_id}', flush=True)
+    payload = f'[SESSION_ID]{session_id}[/SESSION_ID]\n{args.prefix}: {answer}'
+    send_back(args.team, args.leader, payload, env)
+    print(f'[main-worker] sent back to leader event_id={event_id} session_id={session_id}', flush=True)
 
 
 def reap_futures(futures):
