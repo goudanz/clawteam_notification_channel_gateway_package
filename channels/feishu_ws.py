@@ -168,7 +168,11 @@ class FeishuWSAdapter(ChannelAdapter):
 
         def process_message_async(evt: InboundEvent):
             try:
-                result = self.service.handle_event(evt)
+                def on_deferred_reply(text: str):
+                    client.send_text_to_chat(evt.chat_id, text)
+                    log(f"[feishu:{name}] deferred reply sent message_id={evt.message_id} chat={evt.chat_id}")
+
+                result = self.service.handle_event(evt, on_deferred_reply=on_deferred_reply)
                 if result.route:
                     client.send_text_to_chat(evt.chat_id, result.output)
             except Exception as e:

@@ -1,5 +1,6 @@
 import re
 import time
+from collections.abc import Callable
 
 from core.executor import build_clawteam_cmd, run_cmd, wait_for_agent_reply
 from core.log import log
@@ -12,15 +13,7 @@ class GatewayService:
         self.cfg = cfg
         self.resolver = BindingResolver(cfg.bindings)
 
-    @staticmethod
-    def _clean_agent_reply(text: str) -> str:
-        t = (text or "").strip()
-        t = re.sub(r"^\[SESSION_ID\].*?\[/SESSION_ID\]\s*", "", t, flags=re.IGNORECASE | re.DOTALL)
-        # strip worker-added prefixes like "DEV_REPLY:" / "MARKET_REPLY:" / "REPLY:"
-        t = re.sub(r"^[A-Z_]+_?REPLY\s*:\s*", "", t, flags=re.IGNORECASE)
-        return t.strip()
-
-    def handle_event(self, event: InboundEvent) -> DispatchResult:
+    def handle_event(self, event: InboundEvent, on_deferred_reply: Callable[[str], None] | None = None) -> DispatchResult:
         log(
             f"inbound channel={event.channel} app={event.app_id} chat={event.chat_id} "
             f"type={event.message_type} text={event.text[:80]!r}"
@@ -70,10 +63,37 @@ class GatewayService:
                 clean = self._clean_agent_reply(reply)
                 return DispatchResult(ok=True, output=clean[:2000], route=route)
 
+            deferred_timeout = int(route.get("deferred_reply_timeout_sec", max(reply_timeout, 600)))
+            if on_deferred_reply and deferred_timeout > reply_timeout:
+                log(
+                    f"reply-deferred team={team} agent={agent} chat={event.chat_id} "
+                    f"reply_timeout={reply_timeout}s deferred_timeout={deferred_timeout}s"
+                )
+                deferred = wait_for_agent_reply(
+                    team=team,
+                    from_agent=agent,
+                    after_ms=send_started_ms,
+                    timeout_sec=max(1, deferred_timeout - reply_timeout),
+                    session_id=event.session_id,
+                )
+                if deferred:
+                    clean = self._clean_agent_reply(deferred)
+                    on_deferred_reply(clean[:2000])
+                    return DispatchResult(ok=True, output="任务较复杂，已转为后台继续处理，结果已补发。", route={})
+
             log(f"reply-timeout team={team} agent={agent} chat={event.chat_id} timeout={reply_timeout}s")
             return DispatchResult(ok=False, output=f"agent未在{reply_timeout}s内返回结果，请稍后重试。", route=route)
 
         return DispatchResult(ok=True, output=summary, route=route)
+
+    @staticmethod
+    def _clean_agent_reply(text: str) -> str:
+        t = (text or "").strip()
+        t = re.sub(r"^\[SESSION_ID\].*?\[/SESSION_ID\]\s*", "", t, flags=re.IGNORECASE | re.DOTALL)
+        # strip worker-added prefixes like "DEV_REPLY:" / "MARKET_REPLY:" / "REPLY:"
+        t = re.sub(r"^[A-Z_]+_?REPLY\s*:\s*", "", t, flags=re.IGNORECASE)
+        return t.strip()
+
 
     def run_forever(self):
         log("clawteam-notification-channel-gateway running")
