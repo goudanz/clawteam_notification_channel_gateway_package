@@ -14,10 +14,10 @@ SEEN_LOCK = threading.Lock()
 
 SESSION_RE = re.compile(r"^\[SESSION_ID\](.*?)\[/SESSION_ID\]\s*", re.DOTALL)
 JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
-AGENTS = ["product", "law", "code", "quant", "content", "market"]
+AGENTS = ["product", "law", "code", "quant", "content", "market", "research"]
 ROUTER_INSTRUCTION = """你是 main，总入口 CEO agent。
 你的任务不是直接长篇回答，而是先判断这条用户请求应该交给哪些内部 agent。
-可选 agent 只有：product, law, code, quant, content, market。
+可选 agent 只有：product, law, code, quant, content, market, research。
 输出必须是严格 JSON，且只能输出 JSON，不要解释，不要 markdown 代码块。
 格式：{"agents":["product"],"reason":"一句中文","user_intent":"一句中文"}
 规则：
@@ -27,6 +27,7 @@ ROUTER_INSTRUCTION = """你是 main，总入口 CEO agent。
 - 量化/因子/回测/交易/金融研究 => quant
 - 文案/文章/脚本/内容表达 => content
 - 营销/增长/渠道/获客/传播 => market
+- 调研/竞品/行业/资料/技术选型/情报/研究报告 => research
 - 至少 1 个，最多 3 个；不确定默认 product
 """
 SYNTH_INSTRUCTION = """你是 main，总入口 CEO agent。
@@ -132,6 +133,7 @@ def expand_agents_by_keywords(user_text, agents):
         ('quant', ['数据指标', '指标', 'roi', '转化', '留存', '量化', '测算']),
         ('content', ['文案', '内容', '话术', '品牌表达', '落地页']),
         ('market', ['获客', '增长', '渠道', '营销', 'gtm', '市场', '客户']),
+        ('research', ['调研', '研究', '竞品', '行业', '资料', '情报', '技术选型', '开源方案', '论文']),
     ]
     for agent, keywords in mapping:
         if any(k.lower() in text for k in keywords) and agent not in result:
@@ -152,7 +154,35 @@ def normalize_agents(value):
     return (result or ['product'])[:3]
 
 
-def build_agent_prompt(agent, user_text, intent, reason):
+def load_agent_skill_map(root_workspace):
+    path = Path(root_workspace) / 'AGENT_SKILL_MAP.json'
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+    result = {}
+    for agent, entries in (data.get('agents') or {}).items():
+        skills = []
+        for entry in entries or []:
+            if entry.get('workspace_exists'):
+                skill = str(entry.get('skill') or '').strip()
+                if skill and skill not in skills:
+                    skills.append(skill)
+        result[str(agent).strip()] = skills
+    return result
+
+
+def build_agent_prompt(agent, user_text, intent, reason, preferred_skills=None):
+    preferred_skills = preferred_skills or []
+    skill_lines = '\n'.join(f'- {skill}' for skill in preferred_skills)
+    skill_block = 'main 判断你本次优先可用的 skills：\n'
+    if skill_lines:
+        skill_block += skill_lines + '\n'
+        skill_block += '规则：若这些 skills 与当前任务匹配，优先先按这些 skills 的能力边界与方法完成，不要只给泛泛建议。\n'
+    else:
+        skill_block += '- 当前没有额外的 skill 提示，请按你的职责直接处理。\n'
     return f"""你是 {agent} 专业 agent。
 请只从 {agent} 职责出发回答，不要扩展到别的领域。
 
@@ -163,6 +193,7 @@ main 对任务的理解：
 - 用户真实目标：{intent}
 - 分派原因：{reason}
 
+{skill_block}
 请直接输出你这个专业视角下最有用的结果，中文，务实，可执行。"""
 
 
@@ -175,6 +206,7 @@ def build_synth_prompt(user_text, intent, reason, outputs):
 
 def process_message(nanobot_bin, root_workspace, session_id, body):
     main_ws = str(Path(root_workspace) / 'main')
+    agent_skill_map = load_agent_skill_map(root_workspace)
     rc, route_raw = ask_nanobot(nanobot_bin, main_ws, session_id + ':main-router', ROUTER_INSTRUCTION + '\n\n用户消息：\n' + body, timeout=300)
     route = extract_json(route_raw)
     agents = normalize_agents(route.get('agents'))
@@ -185,8 +217,9 @@ def process_message(nanobot_bin, root_workspace, session_id, body):
     outputs = {}
     for agent in agents:
         ws = str(Path(root_workspace) / agent)
-        prompt = build_agent_prompt(agent, body, intent, reason)
-        print(f'[main-worker] calling agent={agent} ws={ws}', flush=True)
+        preferred_skills = agent_skill_map.get(agent, [])
+        prompt = build_agent_prompt(agent, body, intent, reason, preferred_skills)
+        print(f'[main-worker] calling agent={agent} ws={ws} preferred_skills={preferred_skills}', flush=True)
         arc, aout = ask_nanobot(nanobot_bin, ws, session_id + ':' + agent, prompt, timeout=900)
         print(f'[main-worker] agent_done agent={agent} rc={arc} out_len={len(aout)}', flush=True)
         outputs[agent] = aout[:3000] if arc == 0 else f'[{agent} 执行失败 rc={arc}]\n{aout[:1200]}'
