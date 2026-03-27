@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,7 @@ class FeishuWSAdapter(ChannelAdapter):
         self._seen_lock = threading.Lock()
         self._seen_ids: dict[str, float] = {}
         self._seen_ttl_sec = 600
+        self._executor = ThreadPoolExecutor(max_workers=int(self.channel_cfg.get("worker_threads", 8) or 8), thread_name_prefix="feishu-event")
 
         apps_file = self.channel_cfg.get("apps_file", "./configs/feishu_apps.yaml")
         self.apps_path = (base_dir / apps_file).resolve() if not Path(apps_file).is_absolute() else Path(apps_file)
@@ -164,6 +166,14 @@ class FeishuWSAdapter(ChannelAdapter):
         except Exception as e:
             log(f"[feishu:{name}] get bot info failed: {e}")
 
+        def process_message_async(evt: InboundEvent):
+            try:
+                result = self.service.handle_event(evt)
+                if result.route:
+                    client.send_text_to_chat(evt.chat_id, result.output)
+            except Exception as e:
+                log(f"[feishu:{name}] async process error message_id={evt.message_id}: {e}")
+
         def on_message(data: Any):
             try:
                 evt = self._extract_event(data, fallback_app_id=app_id)
@@ -210,10 +220,8 @@ class FeishuWSAdapter(ChannelAdapter):
                     except Exception as e:
                         log(f"[feishu:{name}] add reaction failed emoji=OneSecond: {e}")
 
-                result = self.service.handle_event(evt)
-                if result.route:
-                    # Only forward agent reply text to end user.
-                    client.send_text_to_chat(evt.chat_id, result.output)
+                self._executor.submit(process_message_async, evt)
+                log(f"[feishu:{name}] submitted async processing message_id={evt.message_id} chat={evt.chat_id}")
             except Exception as e:
                 log(f"[feishu:{name}] on_message error: {e}")
 
