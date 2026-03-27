@@ -1,4 +1,5 @@
 import re
+import threading
 import time
 from collections.abc import Callable
 
@@ -9,9 +10,68 @@ from core.resolver import BindingResolver
 
 
 class GatewayService:
+    BACKGROUND_HINT = "这个问题稍复杂，我还在处理中，请稍等"
+
     def __init__(self, cfg):
         self.cfg = cfg
         self.resolver = BindingResolver(cfg.bindings)
+
+    @staticmethod
+    def _estimate_wait_strategy(text: str) -> tuple[str, int]:
+        raw = (text or "").strip()
+        t = raw.lower()
+        hard_complex_keywords = [
+            "分别", "各自", "同时从", "多个角度", "多角度", "详细", "完整", "系统", "深入", "展开", "方案",
+            "产品", "法律", "合规", "技术", "实现", "架构", "获客", "增长", "内容", "指标", "数据指标", "商业化",
+            "roadmap", "gtm", "mvp", "api", "architecture",
+        ]
+        simple_keywords = ["只回复", "不超过", "100字", "简要", "一句话", "简短", "简单说", "结论即可"]
+
+        hit_complex = sum(1 for k in hard_complex_keywords if k in raw or k in t)
+        hit_simple = any(k in raw or k in t for k in simple_keywords)
+
+        if hit_complex >= 3 and len(raw) >= 40 and not hit_simple:
+            return "background", 0
+        if hit_complex >= 1 and not hit_simple:
+            return "multi", 100
+        return "simple", 60
+
+    def _wait_reply_in_background(
+        self,
+        *,
+        team: str,
+        agent: str,
+        send_started_ms: int,
+        session_id: str | None,
+        wait_seconds: int,
+        on_deferred_reply: Callable[[str], None] | None,
+        chat_id: str,
+    ) -> None:
+        if not on_deferred_reply or wait_seconds <= 0:
+            return
+
+        def runner():
+            try:
+                deferred = wait_for_agent_reply(
+                    team=team,
+                    from_agent=agent,
+                    after_ms=send_started_ms,
+                    timeout_sec=wait_seconds,
+                    session_id=session_id,
+                )
+                if not deferred:
+                    log(
+                        f"reply-background-timeout team={team} agent={agent} chat={chat_id} "
+                        f"timeout={wait_seconds}s"
+                    )
+                    return
+                clean = self._clean_agent_reply(deferred)
+                on_deferred_reply(clean[:2000])
+                log(f"reply-background-ok team={team} agent={agent} chat={chat_id}")
+            except Exception as e:
+                log(f"reply-background-error team={team} agent={agent} chat={chat_id}: {e}")
+
+        threading.Thread(target=runner, daemon=True, name=f"deferred-reply-{team}-{agent}").start()
 
     def handle_event(self, event: InboundEvent, on_deferred_reply: Callable[[str], None] | None = None) -> DispatchResult:
         log(
@@ -50,7 +110,34 @@ class GatewayService:
         if is_inbox_send:
             team = str(route.get("team") or "")
             agent = str(route.get("agent") or "")
-            reply_timeout = int(route.get("reply_timeout_sec", 60))
+            strategy, dynamic_timeout = self._estimate_wait_strategy(event.text)
+            reply_timeout = dynamic_timeout
+            configured_timeout = int(route.get("reply_timeout_sec", 60))
+            if strategy == "multi":
+                reply_timeout = min(max(dynamic_timeout, 90), configured_timeout)
+            elif strategy == "simple":
+                reply_timeout = min(dynamic_timeout, configured_timeout)
+            else:
+                reply_timeout = 0
+
+            deferred_timeout = int(route.get("deferred_reply_timeout_sec", max(configured_timeout, 600)))
+            log(
+                f"reply-strategy team={team} agent={agent} chat={event.chat_id} "
+                f"strategy={strategy} front_timeout={reply_timeout}s deferred_timeout={deferred_timeout}s"
+            )
+
+            if strategy == "background":
+                self._wait_reply_in_background(
+                    team=team,
+                    agent=agent,
+                    send_started_ms=send_started_ms,
+                    session_id=event.session_id,
+                    wait_seconds=deferred_timeout,
+                    on_deferred_reply=on_deferred_reply,
+                    chat_id=event.chat_id,
+                )
+                return DispatchResult(ok=True, output=self.BACKGROUND_HINT, route=route)
+
             reply = wait_for_agent_reply(
                 team=team,
                 from_agent=agent,
@@ -63,23 +150,21 @@ class GatewayService:
                 clean = self._clean_agent_reply(reply)
                 return DispatchResult(ok=True, output=clean[:2000], route=route)
 
-            deferred_timeout = int(route.get("deferred_reply_timeout_sec", max(reply_timeout, 600)))
             if on_deferred_reply and deferred_timeout > reply_timeout:
                 log(
                     f"reply-deferred team={team} agent={agent} chat={event.chat_id} "
                     f"reply_timeout={reply_timeout}s deferred_timeout={deferred_timeout}s"
                 )
-                deferred = wait_for_agent_reply(
+                self._wait_reply_in_background(
                     team=team,
-                    from_agent=agent,
-                    after_ms=send_started_ms,
-                    timeout_sec=max(1, deferred_timeout - reply_timeout),
+                    agent=agent,
+                    send_started_ms=send_started_ms,
                     session_id=event.session_id,
+                    wait_seconds=max(1, deferred_timeout - reply_timeout),
+                    on_deferred_reply=on_deferred_reply,
+                    chat_id=event.chat_id,
                 )
-                if deferred:
-                    clean = self._clean_agent_reply(deferred)
-                    on_deferred_reply(clean[:2000])
-                    return DispatchResult(ok=True, output="任务较复杂，已转为后台继续处理，结果已补发。", route={})
+                return DispatchResult(ok=True, output=self.BACKGROUND_HINT, route=route)
 
             log(f"reply-timeout team={team} agent={agent} chat={event.chat_id} timeout={reply_timeout}s")
             return DispatchResult(ok=False, output=f"agent未在{reply_timeout}s内返回结果，请稍后重试。", route=route)
