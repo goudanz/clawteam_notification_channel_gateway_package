@@ -167,6 +167,14 @@ class FeishuWSAdapter(ChannelAdapter):
                     log(f"[feishu:{name}] duplicate ignored message_id={evt.message_id}")
                     return
 
+                sender_type = str(_safe_get(data, ["event", "sender", "sender_type"], "") or "").lower()
+                if sender_type and sender_type != "user":
+                    log(
+                        f"[feishu:{name}] non-user sender ignored "
+                        f"message_id={evt.message_id} sender_type={sender_type}"
+                    )
+                    return
+
                 # Ignore messages sent by this bot itself (prevents echo loops).
                 if bot_open_id and evt.sender_id and evt.sender_id == bot_open_id:
                     log(f"[feishu:{name}] self message ignored message_id={evt.message_id}")
@@ -200,7 +208,16 @@ class FeishuWSAdapter(ChannelAdapter):
             except Exception as e:
                 log(f"[feishu:{name}] on_message error: {e}")
 
-        builder = lark.EventDispatcherHandler.builder(encrypt_key, verify_token).register_p2_im_message_receive_v1(on_message)
+        def on_reaction_created(data: Any):
+            reaction_type = str(_safe_get(data, ["event", "reaction_type", "emoji_type"], "") or "")
+            message_id = str(_safe_get(data, ["event", "message_id"], "") or "")
+            log(f"[feishu:{name}] reaction event ignored message_id={message_id} emoji={reaction_type}")
+
+        builder = (
+            lark.EventDispatcherHandler.builder(encrypt_key, verify_token)
+            .register_p2_im_message_receive_v1(on_message)
+            .register_p2_im_message_reaction_created_v1(on_reaction_created)
+        )
         handler = builder.build()
         ws_client = lark.ws.Client(app_id, app_secret, event_handler=handler, log_level=lark.LogLevel.INFO)
 
